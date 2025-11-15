@@ -319,13 +319,13 @@ impl ClientHandler {
         let mut vec: Vec<u8> =
             unsafe { Vec::with_capacity((*self.inner).req_headers.size as usize) };
         unsafe {
-            ptr::copy_nonoverlapping(
+            vec.set_len((*self.inner).req_headers.size as usize);
+            ptr::copy(
                 (*self.inner).request,
                 vec.as_mut_ptr(),
                 (*self.inner).req_headers.size as usize,
             )
         };
-        unsafe { vec.set_len((*self.inner).req_headers.size as usize) };
         unsafe { ((*self.inner).req_headers.compr_alg.into(), vec) }
     }
     pub fn apply_response(
@@ -434,10 +434,17 @@ pub struct SomeClient {
     pub exists: usize,
 }
 
+impl Drop for RawNetworker {
+    fn drop(&mut self) {
+        unsafe { networker_drop(self) };
+    }
+}
+
 // Extern functions
 #[link(name = "networker")]
 unsafe extern "C" {
     fn start(self_: *mut RawNetworker, settings: *mut NetworkerSettings) -> c_int;
+    fn networker_drop(self_: *mut RawNetworker);
     fn apply_client_response(
         self_: *mut RawNetworker,
         client_id: u64,

@@ -119,11 +119,24 @@ int start(Networker* self, struct NetworkerSettings* s){
         close(sock);
         return -errno;
     }
+
+    int reuse = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        close(sock);
+        return -errno;
+    }
+
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
+        close(sock);
+        return -errno;
+    }
+
     int _l = bind(sock, (struct sockaddr*)&sockad, sizeof(sockad));
     if (_l < 0){
         close(sock);
         return -errno;
     }
+    
 
     int _l1 = listen(sock, settings.max_queue);
     if (_l1 < 0){
@@ -173,6 +186,61 @@ int start(Networker* self, struct NetworkerSettings* s){
 
     return 0;
 }
+
+void networker_drop(Networker *self){
+    if (!self || self->initiated != 1) {
+        return;
+    }
+    
+    for(u64 i = 0; i < self->client_num; i++){
+        if(self->clients[i].state != Kill && self->clients[i].state != NonExistent){
+            self->clients[i].state = Kill;  
+        }
+    }
+    
+    proc(self);
+    
+    for(u64 i = 0; i < self->client_num; i++){
+        #if __tls__
+        if (self->clients[i].ssl) {
+            SSL_shutdown(self->clients[i].ssl);
+            SSL_free(self->clients[i].ssl);
+            self->clients[i].ssl = NULL;
+        }
+        #endif
+        
+        if(self->clients[i].sock > 0) {
+            close(self->clients[i].sock);
+        }
+        
+        sfree(self->clients[i].request);
+        sfree(self->clients[i].response);
+    }
+    
+    free(self->clients);
+    self->clients = NULL;
+    
+    if (self->ring) {
+        io_uring_queue_exit(self->ring);
+        free(self->ring);
+        self->ring = NULL;
+    }
+    
+    #if __tls__
+    if (self->ssl_ctx) {
+        SSL_CTX_free(self->ssl_ctx);
+        self->ssl_ctx = NULL;
+    }
+    #endif
+    
+    if(self->sock > 0) {
+        close(self->sock);
+        self->sock = -1;
+    }
+    
+    self->initiated = 0;
+}
+
 
 int proc(Networker* self){
     #define ring *self->ring
@@ -233,12 +301,7 @@ int proc(Networker* self){
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             UserDataOpt data = {0};
             if((now-self->clients[i].activity) > 1200){
-                data.Author = i;
-                data.Operation = OP_Close;
-                sqe->user_data = data.value;
-                io_uring_prep_close(sqe, self->clients[i].sock);
-                sfree(self->clients[i].response);
-                sfree(self->clients[i].request);
+                self->clients[i].state = Kill; 
                 continue;
             }
             data.Operation = OP_Read;
@@ -271,6 +334,7 @@ int proc(Networker* self){
         }
 
         if(self->clients[i].state == Reading){
+            self->clients[i].capacity = self->clients[i].request==NULL?0:self->clients[i].capacity;
             if(self->clients[i].capacity < self->clients[i].req_headers.size || self->clients[i].request == NULL){
                 sfree(self->clients[i].request);
                 self->clients[i].request = malloc(self->clients[i].req_headers.size);
@@ -317,7 +381,12 @@ int proc(Networker* self){
         if(self->clients[i].state == Finished_WS){
             if(self->clients[i].writev_offset >= self->clients[i].response_size){
                 self->clients[i].writev_offset = 0;
+                self->clients[i].response_size = 0;
                 self->clients[i].state = Idle;
+                sfree(self->clients[i].response); 
+                self->clients[i].response = NULL;
+                sfree(self->clients[i].request); 
+                self->clients[i].request = NULL;
             }else{
                 self->clients[i].state = WrittingSock;
             }
@@ -342,8 +411,11 @@ int proc(Networker* self){
             self->clients[i].state = NonExistent;
             self->clients[i].recv_offset = 0;
             self->clients[i].writev_offset = 0;
+            self->clients[i].capacity = 0;
+            self->clients[i].response_size = 0;
             sfree(self->clients[i].response);
             sfree(self->clients[i].request);
+            memset(&self->clients[i].req_headers, 0, sizeof(MessageHeaders));
             continue;
         }
     }
@@ -407,16 +479,6 @@ int proc(Networker* self){
                 
                 }
                 break;
-            case OP_Close:
-                self->clients[ptr].state = Kill;
-                if (self->clients[ptr].response != NULL){
-                    free(self->clients[ptr].response);
-                    self->clients[ptr].response = NULL;
-                }
-                if(self->clients[ptr].request != NULL){
-                    free(self->clients[ptr].request);
-                    self->clients[ptr].request = NULL;
-                }
             default: break;
         }
     }
@@ -431,7 +493,7 @@ int apply_client_response(Networker* self, u64 client_id, unsigned char* buffer,
     if (!(client_id < self->client_num && self->clients[client_id].state == Processing)){
         return -ENOPKG;
     }
-    MessageHeaders headers;
+    MessageHeaders headers = {0};
     headers.size =  buffer_size;
     headers.compr_alg = compression_algorithm;
     usize rbs = sizeof(MessageHeaders) + buffer_size;

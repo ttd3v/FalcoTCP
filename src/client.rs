@@ -78,17 +78,18 @@ struct Settings {
 */
 impl Client {
     pub fn new(host: &str, port: u16, #[cfg(feature = "tls")] domain: &str) -> Result<Self, Error> {
+        let host = match CString::from_str(host) {
+            Ok(a) => a,
+            Err(e) => return Err(Error::new(ErrorKind::InvalidInput, e)),
+        };
+        #[cfg(feature = "tls")]
+        let domain_cstring =
+            CString::from_str(domain).map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
         let mut settings = Settings {
-            host: match CString::from_str(host) {
-                Ok(a) => a.into_raw(),
-                Err(e) => return Err(Error::new(ErrorKind::InvalidInput, e)),
-            },
+            host: host.as_ptr() as *mut i8,
             port,
             #[cfg(feature = "tls")]
-            domain: match CString::from_str(domain) {
-                Ok(a) => a.into_raw(),
-                Err(e) => return Err(Error::new(ErrorKind::InvalidInput, e)),
-            },
+            domain: domain_cstring.as_ptr() as *mut i8,
         };
         let mut client = zero();
         let a = unsafe { pc_create(&mut client, &mut settings) };
@@ -112,21 +113,26 @@ impl Client {
             compr_alg: compression,
             size: value.len() as u64,
         };
+        println!("-");
         {
             let res = unsafe { pc_input_request(self, value.as_mut_ptr(), input_headers) };
             if res < 0 {
                 return Err(Error::from_raw_os_error(res));
             }
         }
-        let buf: *mut u8 = std::ptr::null_mut();
+        drop(value);
+        println!("+");
+        let mut buf: *mut u8 = std::ptr::null_mut();
         let mut headers: MessageHeaders = MessageHeaders::default();
 
+        println!("/");
         {
-            let res = unsafe { pc_output_request(self, &buf, &mut headers) };
+            let res = unsafe { pc_output_request(self, &raw mut buf, &mut headers) };
             if res < 0 {
                 return Err(Error::from_raw_os_error(res));
             }
         }
+        println!("\\");
         let vec = unsafe { Vec::from_raw_parts(buf, headers.size as usize, headers.size as usize) };
         match pipeline_receive(headers.compr_alg, vec, var) {
             Ok(a) => Ok(a),
@@ -204,7 +210,7 @@ unsafe extern "C" {
     #[cfg(not(feature = "async"))]
     fn pc_input_request(c: &mut Client, buf: *mut u8, headers: MessageHeaders) -> i32;
     #[cfg(not(feature = "async"))]
-    fn pc_output_request(c: &mut Client, buf: &*mut u8, headers: &mut MessageHeaders) -> i32;
+    fn pc_output_request(c: &mut Client, buf: *mut *mut u8, headers: &mut MessageHeaders) -> i32;
     #[cfg(feature = "async")]
     fn pc_async_input(c: &mut Client, headers: MessageHeaders, buffer: *mut u8) -> i32;
     #[cfg(feature = "async")]

@@ -1,3 +1,4 @@
+#include <string.h>
 #include <asm-generic/errno.h>
 #include <asm-generic/socket.h>
 #include <bits/types/struct_timeval.h>
@@ -78,8 +79,9 @@ struct Packet{
     unsigned char* value;
 };
 
-int pc_create(PrimitiveClient* self, PrimitiveClientSettings settings){
+int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     int fd = socket(AF_INET, SOCK_STREAM, 0);
+    PrimitiveClientSettings settings = *settings_ptr;
     if(fd == -1){
         printf("Failed to create the client, socket failed. [fd: %i | exception: 0]\n",fd);
         return -ENONET; 
@@ -142,8 +144,9 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings settings){
 
 void pc_set_timeout(PrimitiveClient *self, u64 micro_secs){
     #if BLOCKING
-    struct timeval tv;
-    tv.tv_usec = micro_secs;
+    struct timeval tv = {0};
+    tv.tv_sec = micro_secs / 1000000;
+    tv.tv_usec = micro_secs % 1000000;
     setsockopt(self->fd, SOL_SOCKET, SO_RCVTIMEO, (const unsigned char*)&tv, sizeof(tv));
     setsockopt(self->fd, SOL_SOCKET, SO_SNDTIMEO, (const unsigned char*)&tv, sizeof(tv));
     #else
@@ -287,7 +290,9 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
     int res = 0;
     u64 size = headers.size;
     {
+        printf("input-stack\n");
         unsigned char hbuf[sizeof(headers)];
+        memset(hbuf, 0, sizeof(hbuf));
         serialize_message_headers(&headers, hbuf);
         while (written != sizeof(MessageHeaders) && res >= 0){
             int result = pc_write(self, (hbuf)+written, sizeof(headers)-written);     
@@ -295,12 +300,14 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
             written += result;
         }
     }
+    printf("input-buffer\n");
     written = 0;
     while(written != size && res >= 0){
-        int result = pc_write(self,(buf)+written,size-written);
+        int result = pc_write(self,buf+written,size-written);
         res = result & -(result < 0);
         written += result;
     }
+    printf("input-finish\n");
     return res;
 }
 #endif
@@ -311,24 +318,34 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
 int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, MessageHeaders *restrict headers){
     u64 readen = 0;
     int res = 0;
+    printf("output-stack\n");
     {
-        unsigned char buffer[sizeof(MessageHeaders)];
+        unsigned char buffer[sizeof(MessageHeaders)] = {0};
         while(readen < sizeof(MessageHeaders) && res >= 0){
             int result = pc_read(self, (buffer+readen), sizeof(MessageHeaders)-readen);
             res = result & -(result < 0);
+            readen += result;
         }
         deserialize_message_headers(buffer, headers);
     }
+    printf("output-buffer %lu\n",headers->size);
     {
         readen = 0;
         u64 size = headers->size;
         *buf = malloc(size);
-        res = !*buf?-ENOMEM:0;  
+        res = (!*buf)?-ENOMEM:0; 
+        if(res < 0){
+            return res;
+        }
         while(readen < size && res >= 0){
             int result = pc_read(self,(*buf+readen), size-readen);
             res = result & -(result < 0);
+            if(res < 0){return res;}
+            readen += result;
+            
         }
     }
+    printf("output-finish\n");
     return res;
 }
 #endif

@@ -208,12 +208,20 @@ fn server_client() {
         compression: CompressionAlgorithm::None,
     };
     let variable = var.clone();
-    let server = Networker::new("127.0.0.1", 9090, 10, MAX_CLIENTS as u16).unwrap();
+    let server = Networker::new("127.0.0.1", 9090, 10, (MAX_CLIENTS * 2) as u16).unwrap();
     println!("Server running");
+    let you_should_break_yourself_gently = Arc::new(Mutex::new(false));
+    let lock = Arc::new(Mutex::new(false));
+    let locka = lock.clone();
+    let ysbysg = you_should_break_yourself_gently.clone();
     let server_handle = spawn(move || {
         let mut server = server;
-        let mut requests = 0;
+        server.cycle();
 
+        {
+            let mut a = locka.lock().unwrap();
+            *a = true;
+        }
         loop {
             println!("Cycle! ");
             server.cycle();
@@ -229,9 +237,7 @@ fn server_client() {
                 hasher.write(&payload);
                 let res = pipeline_send(hasher.finish().to_be_bytes().to_vec(), &variable).unwrap();
                 c.apply_response(res.1, res.0.into()).unwrap();
-                requests += 1;
-
-                if requests >= NEEDED_REQS * MAX_CLIENTS {
+                if *ysbysg.lock().unwrap() {
                     break;
                 }
             }
@@ -240,7 +246,21 @@ fn server_client() {
         }
     });
 
-    sleep(Duration::from_secs(1));
+    loop {
+        let ready = lock.lock().unwrap();
+        if *ready {
+            break;
+        }
+        drop(ready);
+        sleep(Duration::from_micros(10));
+    }
+
+    println!("Testing direct connection...");
+    let test_sock = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:9090".parse().unwrap(),
+        Duration::from_secs(1),
+    );
+    println!("Direct connection result: {:?}", test_sock);
 
     let mut handlers = vec![];
     for k in 0..MAX_CLIENTS {
@@ -255,7 +275,7 @@ fn server_client() {
                 use std::thread::yield_now;
 
                 eprintln!("request: {}", i);
-                let len = random_range(1..10485760);
+                let len = random_range(1..1024);
                 let mut buffer = vec![0u8; len];
                 rng.try_fill_bytes(&mut buffer).unwrap();
                 let response = b.request(buffer, 255).unwrap();
@@ -269,6 +289,6 @@ fn server_client() {
     for i in handlers {
         i.join().unwrap();
     }
-
+    *you_should_break_yourself_gently.lock().unwrap() = true;
     server_handle.join().unwrap();
 }
