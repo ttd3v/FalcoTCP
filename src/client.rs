@@ -117,7 +117,7 @@ impl Client {
         {
             let res = unsafe { pc_input_request(self, value.as_mut_ptr(), input_headers) };
             if res < 0 {
-                return Err(Error::from_raw_os_error(res));
+                return Err(Error::from_raw_os_error(-res));
             }
         }
         drop(value);
@@ -127,7 +127,7 @@ impl Client {
         {
             let res = unsafe { pc_output_request(self, &raw mut buf, &mut headers) };
             if res < 0 {
-                return Err(Error::from_raw_os_error(res));
+                return Err(Error::from_raw_os_error(-res));
             }
         }
         println!("---\n+++\n");

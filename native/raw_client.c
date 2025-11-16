@@ -1,3 +1,4 @@
+#include <sched.h>
 #include <string.h>
 #include <asm-generic/errno.h>
 #include <asm-generic/socket.h>
@@ -9,8 +10,11 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <threads.h>
 #include <unistd.h>
 #include "net.h"
+
+#define loop while(1)
 
 #if TLS
 #include "openssl/ssl.h"
@@ -22,6 +26,12 @@ typedef u64 number;
 #if !BLOCKING
 #include <string.h>
 #include <fcntl.h>
+#endif
+
+#if BLOCKING
+#pragma message("Compiling in BLOCKING mode")
+#else
+#pragma message("Compiling in NON-BLOCKING mode")
 #endif
 
 // 500 MiB
@@ -83,7 +93,7 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     PrimitiveClientSettings settings = *settings_ptr;
     if(fd == -1){
-        return -ENONET; 
+        return -errno; 
     }
     PrimitiveClient s={0};
     *self=s;
@@ -140,11 +150,12 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
 
 void pc_set_timeout(PrimitiveClient *self, u64 micro_secs){
     #if BLOCKING
-    struct timeval tv = {0};
+    /*struct timeval tv = {0};
     tv.tv_sec = micro_secs / 1000000;
     tv.tv_usec = micro_secs % 1000000;
     setsockopt(self->fd, SOL_SOCKET, SO_RCVTIMEO, (const unsigned char*)&tv, sizeof(tv));
     setsockopt(self->fd, SOL_SOCKET, SO_SNDTIMEO, (const unsigned char*)&tv, sizeof(tv));
+    */
     #else
         self->timeout_micro_secs = micro_secs;
     #endif
@@ -291,8 +302,16 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
         serialize_message_headers(&headers, hbuf);
         while (written != sizeof(MessageHeaders) && res >= 0){
             int result = pc_write(self, (hbuf)+written, sizeof(headers)-written);     
-            res = result & -(result < 0);
             written += result;
+            if(result < 0){
+                switch(result){
+                    case EAGAIN:
+                        break;
+                    default:
+                        return -errno;
+                }
+                sched_yield();
+            }
         }
     }
     if(res < 0){
@@ -312,21 +331,33 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
 }
 #endif
 
-
-
 #if BLOCKING
 int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, MessageHeaders *restrict headers){
     u64 readen = 0;
     int res = 0;
+    printf("@\n");
     {
         unsigned char buffer[sizeof(MessageHeaders)] = {0};
-        while(readen < sizeof(MessageHeaders) && res >= 0){
+        loop{
             int result = pc_read(self, (buffer+readen), sizeof(MessageHeaders)-readen);
-            res = result & -(result < 0);
-            readen += result;
+            if(result  <= 0){
+                if(result == 0){
+                    return -EPIPE;
+                }
+                if(errno == EAGAIN || errno == EWOULDBLOCK){
+                    sched_yield();
+                    continue;
+                }
+                return -errno;
+            }
+            readen += (u64)result;
+            if(readen == sizeof(MessageHeaders)){
+                break;
+            }
         }
         deserialize_message_headers(buffer, headers);
     }
+    printf("@\n");
     {
         readen = 0;
         u64 size = headers->size;
@@ -335,14 +366,15 @@ int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, Messa
         if(res < 0){
             return res;
         }
-        while(readen < size && res >= 0){
+        loop{
             int result = pc_read(self,(*buf+readen), size-readen);
-            res = result & -(result < 0);
-            if(res < 0){return res;}
-            readen += result;
-            
+            readen += (u64)result;
+            if(result <= 0){return -errno;}
+            if(readen == size){break;};
         }
     }
+    printf("@/\n");
+    
     return res;
 }
 #endif

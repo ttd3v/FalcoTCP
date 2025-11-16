@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <liburing/io_uring.h>
@@ -20,6 +21,8 @@
 #include "net.h"
 #include <netinet/tcp.h>
 
+
+#define iclnt self->clients[i]
 #if __tls__
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -153,11 +156,12 @@ int start(Networker* self, struct NetworkerSettings* s){
     }
     memset(self->clients, 0, sizeof(Client)*self->client_num);
     for(usize i = 0; i < self->client_num; i++){
-        self->clients[i].id = i;
-        self->clients[i].capacity = 0;
-        self->clients[i].request = NULL;
-        self->clients[i].response = NULL;
-        self->clients[i].state = NonExistent;
+        iclnt.id = i;
+        iclnt.capacity = 0;
+        iclnt.request = NULL;
+        iclnt.response = NULL;
+        iclnt.state = NonExistent;
+        iclnt.flag = 0;
     }
 
     self->ring = calloc(1,sizeof(struct io_uring));
@@ -195,8 +199,8 @@ void networker_drop(Networker *self){
     }
     
     for(u64 i = 0; i < self->client_num; i++){
-        if(self->clients[i].state != Kill && self->clients[i].state != NonExistent){
-            self->clients[i].state = Kill;  
+        if(iclnt.state != Kill && iclnt.state != NonExistent){
+            iclnt.state = Kill;  
         }
     }
     
@@ -204,19 +208,19 @@ void networker_drop(Networker *self){
     
     for(u64 i = 0; i < self->client_num; i++){
         #if __tls__
-        if (self->clients[i].ssl) {
-            SSL_shutdown(self->clients[i].ssl);
-            SSL_free(self->clients[i].ssl);
-            self->clients[i].ssl = NULL;
+        if (iclnt.ssl) {
+            SSL_shutdown(iclnt.ssl);
+            SSL_free(iclnt.ssl);
+            iclnt.ssl = NULL;
         }
         #endif
         
-        if(self->clients[i].sock > 0) {
-            close(self->clients[i].sock);
+        if(iclnt.sock > 0) {
+            close(iclnt.sock);
         }
         
-        sfree(self->clients[i].request);
-        sfree(self->clients[i].response);
+        sfree(iclnt.request);
+        sfree(iclnt.response);
     }
     
     free(self->clients);
@@ -242,88 +246,95 @@ void networker_drop(Networker *self){
     
     self->initiated = 0;
 }
-
-
 int proc(Networker* self){
     #define ring *self->ring
-    #define mutate ;mut++;
+    #define DRAIN()\
+        do{\
+            iclnt.flag |= 1;\
+        }while(0);\
+
+    #define mutate ;mut++;DRAIN();
     u64 now = time(NULL);
     int mut = 0; 
     for(u64 i = 0; i < self->client_num; i++){
-        if(self->clients[i].state == NonExistent){
+        if((iclnt.flag & 1)==1){continue;}
+        printf("[SERVER] Client(%lu) : %i\n",i,iclnt.state);
+        if(iclnt.state == NonExistent){
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             io_uring_prep_accept(sqe, self->sock, NULL,NULL, 0);
             UserDataOpt data = {0};
             data.Author = i;
             data.Operation = OP_SocketAcc;
-            self->clients[i].state = WaitingForAccept;
+            iclnt.state = WaitingForAccept;
             sqe->user_data = data.value;
             mutate
             continue;
         }       
         
-        if(self->clients[i].state == WaitingForAccept){continue;}
+        if(iclnt.state == WaitingForAccept){continue;}
 
         #if __tls__
         
-        if(self->clients[i].state == TlsHandshake){
-            if (self->clients[i].ssl == NULL) {
-                self->clients[i].ssl = SSL_new(self->ssl_ctx);
-                if (self->clients[i].ssl == NULL) {
+        if(iclnt.state == TlsHandshake){
+            if (iclnt.ssl == NULL) {
+                iclnt.ssl = SSL_new(self->ssl_ctx);
+                if (iclnt.ssl == NULL) {
                     ERR_print_errors_fp(stderr);
-                    self->clients[i].state = Kill;
+                    iclnt.state = Kill;
                     continue;
                 }
         
-                SSL_set_fd(self->clients[i].ssl, self->clients[i].sock);
+                SSL_set_fd(iclnt.ssl, iclnt.sock);
             }
     
             // Perform SSL handshake
-            int handshake_result = SSL_accept(self->clients[i].ssl);
+            int handshake_result = SSL_accept(iclnt.ssl);
     
             if (handshake_result <= 0) {
-                self->clients[i].state = Kill;     
+                iclnt.state = Kill;     
                 continue;
             }
     
     
-            if (BIO_get_ktls_send(SSL_get_wbio(self->clients[i].ssl)) && BIO_get_ktls_recv(SSL_get_rbio(self->clients[i].ssl))) {
-                self->clients[i].ktls = 1;
+            if (BIO_get_ktls_send(SSL_get_wbio(iclnt.ssl)) && BIO_get_ktls_recv(SSL_get_rbio(iclnt.ssl))) {
+                iclnt.ktls = 1;
             } else {
-                self->clients[i].state = Kill;
+                iclnt.state = Kill;
                 continue;
             }
-            self->clients[i].state = Idle;
+            iclnt.state = Idle;
             continue; 
         }
 
         #endif
 
-        if(self->clients[i].state == Idle){
+        if(iclnt.state == Idle){
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             UserDataOpt data = {0};
-            if((now-self->clients[i].activity) > 1200){
-                self->clients[i].state = Kill; 
+            if((now-iclnt.activity) > 1200){
+                iclnt.state = Kill; 
                 continue;
             }
             data.Operation = OP_Read;
             data.Author = i;
-            self->clients[i].state = Finished_H;
+            iclnt.state = Finished_H;
             sqe->user_data = data.value;
             mutate
-            io_uring_prep_read(sqe,self->clients[i].sock, (unsigned char*)(&self->clients[i].req_headers)+self->clients[i].recv_offset, MESSAGE_HEADERS_SIZE-self->clients[i].recv_offset, 0);
+            io_uring_prep_read(sqe,iclnt.sock, (unsigned char*)(&iclnt.req_headers)+iclnt.recv_offset, MESSAGE_HEADERS_SIZE-iclnt.recv_offset, 0);
             continue;
         }
 
-        if(self->clients[i].state == Finished_H){
-            if(self->clients[i].recv_offset == MESSAGE_HEADERS_SIZE){
-                self->clients[i].recv_offset = 0;
-                deserialize_message_headers((const uint8_t*)&self->clients[i].req_headers, 
-                            &self->clients[i].req_headers); 
-                self->clients[i].state = Reading;
+        if(iclnt.state == Finished_H){
+            if(iclnt.recv_offset == MESSAGE_HEADERS_SIZE){
+                iclnt.recv_offset = 0;
+                unsigned char buffer[9];
+                memcpy(buffer, &iclnt.req_headers, 9);
+                deserialize_message_headers(buffer, &iclnt.req_headers);
+                iclnt.state = Reading;
+                printf("[SERVER] Client(%lu) Headers->size %lu\n",i,iclnt.req_headers.size);
             }else{
-                if(self->clients[i].recv_offset == 0){
-                    self->clients[i].state = Idle;
+                if(iclnt.recv_offset == 0){
+                    iclnt.state = Idle;
                     continue;
                 }
                 UserDataOpt data = {0};
@@ -332,75 +343,76 @@ int proc(Networker* self){
                 data.Operation = OP_Read;
                 sqe->user_data = data.value;
                 mutate
-                io_uring_prep_read(sqe,self->clients[i].sock, (unsigned char*)(&self->clients[i].req_headers)+self->clients[i].recv_offset, MESSAGE_HEADERS_SIZE-self->clients[i].recv_offset, 0);
+                io_uring_prep_read(sqe,iclnt.sock, (unsigned char*)(&iclnt.req_headers)+iclnt.recv_offset, MESSAGE_HEADERS_SIZE-iclnt.recv_offset, 0);
                 continue;
             }
         }
 
-        if(self->clients[i].state == Reading){
-            self->clients[i].capacity = self->clients[i].request==NULL?0:self->clients[i].capacity;
-            if(self->clients[i].capacity < self->clients[i].req_headers.size || self->clients[i].request == NULL){
-                sfree(self->clients[i].request);
-                self->clients[i].request = malloc(self->clients[i].req_headers.size);
-                self->clients[i].capacity = self->clients[i].req_headers.size;
+        if(iclnt.state == Reading){
+            iclnt.capacity = iclnt.request==NULL?0:iclnt.capacity;
+            if(iclnt.capacity < iclnt.req_headers.size || iclnt.request == NULL){
+                sfree(iclnt.request);
+                iclnt.request = malloc(iclnt.req_headers.size);
+                iclnt.capacity = iclnt.req_headers.size;
             }
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             UserDataOpt data = {0};
             data.Author = i;
             data.Operation = OP_Read;
             sqe->user_data = data.value;
-            self->clients[i].state = Finished_R;
+            iclnt.state = Finished_R;
             mutate
-            io_uring_prep_read(sqe,self->clients[i].sock,self->clients[i].request + self->clients[i].recv_offset,self->clients[i].req_headers.size-self->clients[i].recv_offset,0);
+            io_uring_prep_read(sqe,iclnt.sock,iclnt.request + iclnt.recv_offset,iclnt.req_headers.size-iclnt.recv_offset,0);
             continue;
         }
 
-        if(self->clients[i].state == Finished_R){
-            if(self->clients[i].recv_offset == self->clients[i].req_headers.size){
-                self->clients[i].recv_offset = 0;
-                self->clients[i].state = Available;
+        if(iclnt.state == Finished_R){
+            if(iclnt.recv_offset == iclnt.req_headers.size){
+                iclnt.recv_offset = 0;
+                iclnt.state = Available;
             }else{
-                self->clients[i].state = Reading;
+                iclnt.state = Reading;
             }
             continue;
         }
 
-        if(self->clients[i].state == Ready){
-            self->clients[i].writev_offset = 0;
-            self->clients[i].activity = now;
-            self->clients[i].state = WrittingSock;
+        if(iclnt.state == Ready){
+            iclnt.writev_offset = 0;
+            iclnt.activity = now;
+            iclnt.state = WrittingSock;
             continue;
         }
-        if(self->clients[i].state == WrittingSock){
+        if(iclnt.state == WrittingSock){
             mutate
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             UserDataOpt data = {0};
             data.Author = i;
             data.Operation = OP_Write;
             sqe->user_data = data.value;
-            io_uring_prep_write(sqe, self->clients[i].sock, 
-                       (self->clients[i].response) + self->clients[i].writev_offset, 
-                       self->clients[i].response_size - self->clients[i].writev_offset, 0);
-            self->clients[i].state = Finished_WS;
+            io_uring_prep_write(sqe, iclnt.sock, 
+                       (iclnt.response) + iclnt.writev_offset, 
+                       iclnt.response_size - iclnt.writev_offset, 0);
+            iclnt.state = Finished_WS;
             continue;
         }
-        if(self->clients[i].state == Finished_WS){
-            if(self->clients[i].writev_offset >= self->clients[i].response_size){
-                self->clients[i].writev_offset = 0;
-                self->clients[i].response_size = 0;
-                self->clients[i].state = Cooldown;
+        if(iclnt.state == Finished_WS){
+            if(iclnt.writev_offset >= iclnt.response_size){
+                iclnt.writev_offset = 0;
+                iclnt.recv_offset = 0;
+                iclnt.response_size = 0;
+                iclnt.state = Cooldown;
             }else{
-                self->clients[i].state = WrittingSock;
+                iclnt.state = WrittingSock;
             }
             continue;
         }
-        if(self->clients[i].state == Kill){
+        if(iclnt.state == Kill){
             #if __tls__
-            if (self->clients[i].ssl) {
-                SSL_shutdown(self->clients[i].ssl);
-                SSL_free(self->clients[i].ssl);
-                self->clients[i].ssl = NULL;
-                self->clients[i].ktls = 0;
+            if (iclnt.ssl) {
+                SSL_shutdown(iclnt.ssl);
+                SSL_free(iclnt.ssl);
+                iclnt.ssl = NULL;
+                iclnt.ktls = 0;
             }
             #endif
             mutate
@@ -410,23 +422,25 @@ int proc(Networker* self){
             data.Operation = OP_Close;
             sqe->user_data = data.value;
 
-            io_uring_prep_close(sqe, self->clients[i].sock);
-            self->clients[i].state = NonExistent;
-            self->clients[i].recv_offset = 0;
-            self->clients[i].writev_offset = 0;
-            self->clients[i].capacity = 0;
-            self->clients[i].response_size = 0;
-            sfree(self->clients[i].response);
-            sfree(self->clients[i].request);
-            memset(&self->clients[i].req_headers, 0, sizeof(MessageHeaders));
+            io_uring_prep_close(sqe, iclnt.sock);
+            iclnt.state = NonExistent;
+            iclnt.recv_offset = 0;
+            iclnt.writev_offset = 0;
+            iclnt.capacity = 0;
+            iclnt.response_size = 0;
+            sfree(iclnt.response);
+            sfree(iclnt.request);
+            memset(&iclnt.req_headers, 0, sizeof(MessageHeaders));
             continue;
         }
-        if(self->clients[i].state == Cooldown){
-            self->clients[i].state = Idle;
-            sfree(self->clients[i].response); 
-            sfree(self->clients[i].request);
-            self->clients[i].response = NULL;
-            self->clients[i].request = NULL;
+        if(iclnt.state == Cooldown){
+            iclnt.state = Idle;
+            sfree(iclnt.response); 
+            sfree(iclnt.request);
+            iclnt.response = NULL;
+            iclnt.request = NULL;
+            memset(&iclnt.req_headers, 0, sizeof(MessageHeaders));
+            continue;
         }
     }
 
@@ -454,7 +468,7 @@ int proc(Networker* self){
             continue;
         }
 
-        
+        self->clients[ptr].flag &= ~1; 
         self->clients[ptr].activity = now; 
         switch((int)data.Operation){
             case OP_Read:
@@ -465,8 +479,6 @@ int proc(Networker* self){
                 break;
             case OP_SocketAcc:
                 {
-                u64 saved_id = self->clients[ptr].id;
-                memset(&self->clients[ptr], 0, sizeof(Client));
                 self->clients[ptr].sock = res;
 
                 #if __tls__
@@ -474,9 +486,6 @@ int proc(Networker* self){
                 #else
                     self->clients[ptr].state = Idle;
                 #endif
-                
-                self->clients[ptr].id = saved_id;
-                
                 }
                 break;
             default: break;
@@ -510,8 +519,8 @@ int apply_client_response(Networker* self, u64 client_id, unsigned char* buffer,
 }
 SomeClient get_client(Networker* self){
     for(usize i = 0; i < self->client_num; i ++) {
-        if(self->clients[i].state == Available){
-            return (SomeClient) {&self->clients[i],1};
+        if(iclnt.state == Available){
+            return (SomeClient) {&iclnt,1};
         }
     }
     return (SomeClient){NULL, 0};
@@ -522,14 +531,14 @@ int claim_client(Networker* self, u64 client_id){
         self->clients[client_id].state = Processing;
         return 0;
     }
-    return -ENOPKG;
+    return -ENOKEY;
 }
 int kill_client(Networker* self, u64 client_id){
     if(client_id < self->client_num){
         self->clients[client_id].state = Kill;
         return 0;
     }
-    return -ENOPKG;
+    return -ENOKEY;
 }
 
 int cycle(Networker* self){

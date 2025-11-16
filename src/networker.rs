@@ -251,6 +251,9 @@ struct Client {
     pub state: c_int,
     pub activity: u64,
     pub capacity: u64,
+    __f: u8,
+    #[cfg(feature = "tls")]
+    __p: [u8; 12],
 }
 
 impl Client {

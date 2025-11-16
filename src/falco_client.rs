@@ -81,7 +81,7 @@ impl FalcoClient {
     #[cfg(feature = "async")]
     pub async fn request(&self, input: Vec<u8>, allow_mitigation: u8) -> Result<Vec<u8>, Error> {
         let (s, k) = self.get_handle().await;
-        match s.lock().await.request(&input, &self.var).await {
+        match s.lock().await.reqest(&input, &self.var).await {
             Ok(a) => Ok(a),
             Err(e) => {
                 use std::io::ErrorKind;
@@ -183,8 +183,6 @@ fn server_client() {
     use crate::networker::Networker;
     #[cfg(feature = "encryption")]
     use aes_gcm::{Aes256Gcm, KeyInit};
-    use rand::rngs::OsRng;
-    use std::hash::DefaultHasher;
     use std::thread::{sleep, spawn};
     use std::time::Duration;
 
@@ -199,8 +197,8 @@ fn server_client() {
         Aes256Gcm::new_from_slice(&key).unwrap()
     }
 
-    const MAX_CLIENTS: usize = 1;
-    const NEEDED_REQS: usize = 10;
+    const MAX_CLIENTS: usize = 100;
+    const NEEDED_REQS: usize = 100;
     let var: Var = Var {
         #[cfg(feature = "encryption")]
         cipher: get(),
@@ -209,10 +207,9 @@ fn server_client() {
     };
     let variable = var.clone();
     let server = Networker::new("127.0.0.1", 9090, 10, (MAX_CLIENTS * 2) as u16).unwrap();
-    let you_should_break_yourself_gently = Arc::new(Mutex::new(false));
     let lock = Arc::new(Mutex::new(false));
     let locka = lock.clone();
-    let ysbysg = you_should_break_yourself_gently.clone();
+    let mut requests = 0;
     let server_handle = spawn(move || {
         let mut server = server;
         server.cycle();
@@ -222,33 +219,38 @@ fn server_client() {
             *a = true;
         }
         loop {
-            use std::thread::yield_now;
-
             server.cycle();
 
             if let Some(c) = server.get_client() {
+                println!("[SERVER] request!");
                 use crate::falco_pipeline::{pipeline_receive, pipeline_send};
-
+                requests += 1;
                 let (cmpr, value) = c.get_request();
                 let payload = pipeline_receive(cmpr.into(), value, &variable).unwrap();
 
                 let res = pipeline_send(payload.iter().map(|f| !*f).collect(), &variable).unwrap();
                 c.apply_response(res.1, res.0.into()).unwrap();
-                if *ysbysg.lock().unwrap() {
+                println!("[SERVER] responded!");
+                if requests == MAX_CLIENTS * NEEDED_REQS {
+                    println!("[SERVER] finishing...");
                     break;
                 }
+            } else {
+                println!("Sleeeep, requests:{}\n", requests);
+                sleep(Duration::from_millis(10));
             }
-            yield_now();
         }
     });
 
     loop {
+        use std::thread::yield_now;
+
         let ready = lock.lock().unwrap();
         if *ready {
             break;
         }
         drop(ready);
-        sleep(Duration::from_micros(10));
+        yield_now();
     }
 
     println!("Testing direct connection...");
@@ -262,15 +264,27 @@ fn server_client() {
     for k in 0..MAX_CLIENTS {
         let variable = var.clone();
         handlers.push(spawn(move || {
+            sleep(Duration::from_millis(10));
             let b = FalcoClient::new(1, variable.clone(), "127.0.0.1", 9090).unwrap();
             let n = Instant::now();
-            for _ in 0..NEEDED_REQS {
-                use std::thread::yield_now;
-
-                let buffer = vec![0u8; 8];
-                let response = b.request(buffer, 255).unwrap();
-                assert_eq!(response.len(), 8);
-                yield_now();
+            for i in 0..=NEEDED_REQS {
+                use rand::random_range;
+                println!("client {} is at {}", k, i);
+                let len = random_range(1..(1024 * 1024));
+                let buffer = vec![0u8; len];
+                let response = match b.request(buffer, 1) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        if i + 1 == NEEDED_REQS {
+                            return;
+                        }
+                        panic!("{}", e);
+                    }
+                };
+                assert_eq!(response.len(), len);
+                if i + 1 == NEEDED_REQS {
+                    break;
+                }
             }
             eprintln!("CLIENT({}) -> {}ns", k, n.elapsed().as_nanos());
         }));
@@ -279,6 +293,5 @@ fn server_client() {
     for i in handlers {
         i.join().unwrap();
     }
-    *you_should_break_yourself_gently.lock().unwrap() = true;
     server_handle.join().unwrap();
 }

@@ -38,17 +38,17 @@ fn main() {
             build.flag("-O3");
             #[cfg(feature = "tls")]
             {
-                build.flag("-D TLS=1");
+                build.flag("-DTLS=1");
                 println!("cargo:rustc-link-lib=static=ssl");
                 println!("cargo:rustc-link-lib=static=crypto");
             }
             #[cfg(feature = "async")]
             {
-                build.flag("-D BLOCKING=0");
+                build.flag("-DBLOCKING=0");
             }
             #[cfg(not(feature = "async"))]
             {
-                build.flag("-D BLOCKING=1");
+                build.flag("-DBLOCKING=1");
             }
             build.compile("raw_client");
         }

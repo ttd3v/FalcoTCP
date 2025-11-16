@@ -46,11 +46,12 @@ typedef union{
 } UserDataOpt;
 
 // Message headers
+#pragma pack(push, 1)
 typedef struct {
     u64 size;
     u8 compr_alg;
 } MessageHeaders;
-
+#pragma pack(pop)
 // Client structure
 
 typedef struct {
@@ -59,12 +60,13 @@ typedef struct {
     unsigned char* response;
     MessageHeaders req_headers; 
     u64 response_size;
-    usize recv_offset;
-    usize writev_offset;
+    u64 recv_offset;
+    u64 writev_offset;
     u64 id; 
-    int state;
+    i32 state;
     u64 activity;
     u64 capacity;
+    u8 flag;
     #if __tls__
     SSL *ssl;
     unsigned int ktls; // MSB -> RECV TLS enabled | LSB -> KTLS SEND enabled 
