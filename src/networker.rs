@@ -234,6 +234,7 @@ pub enum State {
     WrittingSock = 9,
     Kill = 10,
     FinishedWS = 11,
+    Cooldown = 12,
 }
 
 // Client

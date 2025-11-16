@@ -83,7 +83,6 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     PrimitiveClientSettings settings = *settings_ptr;
     if(fd == -1){
-        printf("Failed to create the client, socket failed. [fd: %i | exception: 0]\n",fd);
         return -ENONET; 
     }
     PrimitiveClient s={0};
@@ -97,18 +96,16 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     sets.sin_port = htons(settings.port);
     int result = inet_pton(AF_INET, settings.host, &sets.sin_addr);
     if (result < 0){
-        printf("Failed to create the client, inet_pton failed. [result: %i | exception: 1]\n",errno);
         close(fd);
         return -errno;
     };
     result = connect(fd, (struct sockaddr*)(&sets), sizeof(sets));
     if(result < 0){
         // exception 2
-        printf("Failed to create the client :( [ result: %i | exception: 2]\n",errno);
         close(fd);
         return -errno;
     }
-    self->fd = fd;
+    
     #if TLS
         SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
         SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
@@ -127,16 +124,15 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     #if !BLOCKING
         int flags= fcntl(fd, F_GETFL,0);
         if(flags < 0){
-            printf("Failed to create the client :( [ result: %i | exception: 3]\n",errno);
             return -1;
         }
         flags |= O_NONBLOCK;
         result = fcntl(fd, F_SETFL, flags);
         if(result < 0){
-            printf("Failed to create the client :( [ result: %i | exception: 4]\n",errno);
             return -ENOTSOCK;
         };
     #endif
+    self->fd = fd;
     return 0;
 }
 
@@ -290,8 +286,7 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
     int res = 0;
     u64 size = headers.size;
     {
-        printf("input-stack\n");
-        unsigned char hbuf[sizeof(headers)];
+        unsigned char hbuf[9];
         memset(hbuf, 0, sizeof(hbuf));
         serialize_message_headers(&headers, hbuf);
         while (written != sizeof(MessageHeaders) && res >= 0){
@@ -300,15 +295,20 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
             written += result;
         }
     }
-    printf("input-buffer\n");
+    if(res < 0){
+        printf("bad -\n");
+        return -errno;
+    }
     written = 0;
     while(written != size && res >= 0){
         int result = pc_write(self,buf+written,size-written);
         res = result & -(result < 0);
         written += result;
     }
-    printf("input-finish\n");
-    return res;
+    if(res < 0){
+        return -errno;
+    }
+    return 0;
 }
 #endif
 
@@ -318,7 +318,6 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
 int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, MessageHeaders *restrict headers){
     u64 readen = 0;
     int res = 0;
-    printf("output-stack\n");
     {
         unsigned char buffer[sizeof(MessageHeaders)] = {0};
         while(readen < sizeof(MessageHeaders) && res >= 0){
@@ -328,7 +327,6 @@ int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, Messa
         }
         deserialize_message_headers(buffer, headers);
     }
-    printf("output-buffer %lu\n",headers->size);
     {
         readen = 0;
         u64 size = headers->size;
@@ -345,7 +343,6 @@ int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, Messa
             
         }
     }
-    printf("output-finish\n");
     return res;
 }
 #endif

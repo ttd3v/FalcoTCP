@@ -33,6 +33,7 @@ enum State {
     WrittingSock = 9,
     Kill = 10,
     Finished_WS = 11,
+    Cooldown = 12,
 };
 
 typedef union{

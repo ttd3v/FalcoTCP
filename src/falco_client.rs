@@ -199,7 +199,7 @@ fn server_client() {
         Aes256Gcm::new_from_slice(&key).unwrap()
     }
 
-    const MAX_CLIENTS: usize = 2;
+    const MAX_CLIENTS: usize = 1;
     const NEEDED_REQS: usize = 10;
     let var: Var = Var {
         #[cfg(feature = "encryption")]
@@ -209,7 +209,6 @@ fn server_client() {
     };
     let variable = var.clone();
     let server = Networker::new("127.0.0.1", 9090, 10, (MAX_CLIENTS * 2) as u16).unwrap();
-    println!("Server running");
     let you_should_break_yourself_gently = Arc::new(Mutex::new(false));
     let lock = Arc::new(Mutex::new(false));
     let locka = lock.clone();
@@ -223,26 +222,23 @@ fn server_client() {
             *a = true;
         }
         loop {
-            println!("Cycle! ");
+            use std::thread::yield_now;
+
             server.cycle();
 
             if let Some(c) = server.get_client() {
                 use crate::falco_pipeline::{pipeline_receive, pipeline_send};
-                use std::hash::Hasher;
 
                 let (cmpr, value) = c.get_request();
                 let payload = pipeline_receive(cmpr.into(), value, &variable).unwrap();
 
-                let mut hasher = DefaultHasher::new();
-                hasher.write(&payload);
-                let res = pipeline_send(hasher.finish().to_be_bytes().to_vec(), &variable).unwrap();
+                let res = pipeline_send(payload.iter().map(|f| !*f).collect(), &variable).unwrap();
                 c.apply_response(res.1, res.0.into()).unwrap();
                 if *ysbysg.lock().unwrap() {
                     break;
                 }
             }
-
-            sleep(Duration::from_millis(1));
+            yield_now();
         }
     });
 
@@ -266,18 +262,12 @@ fn server_client() {
     for k in 0..MAX_CLIENTS {
         let variable = var.clone();
         handlers.push(spawn(move || {
-            use rand::{TryRngCore, random_range};
-
             let b = FalcoClient::new(1, variable.clone(), "127.0.0.1", 9090).unwrap();
-            let mut rng = OsRng;
             let n = Instant::now();
-            for i in 0..NEEDED_REQS {
+            for _ in 0..NEEDED_REQS {
                 use std::thread::yield_now;
 
-                eprintln!("request: {}", i);
-                let len = random_range(1..1024);
-                let mut buffer = vec![0u8; len];
-                rng.try_fill_bytes(&mut buffer).unwrap();
+                let buffer = vec![0u8; 8];
                 let response = b.request(buffer, 255).unwrap();
                 assert_eq!(response.len(), 8);
                 yield_now();

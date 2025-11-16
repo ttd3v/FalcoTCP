@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>   
 #include <arpa/inet.h>    
+#include <threads.h>
 #include <time.h>
 #include <unistd.h>       
 #include "numbers.h"
@@ -143,16 +144,17 @@ int start(Networker* self, struct NetworkerSettings* s){
         close(sock);
         return -errno;
     }
-    printf("Server listening on port %d with backlog %d\n", settings.port, settings.max_queue);
     self->sock = sock;
     self->initiated = 1;
 
-    self->clients = (Client*)calloc(self->client_num, sizeof(Client));
+    self->clients = (Client*)malloc(self->client_num*sizeof(Client));
     if(!self->clients){
         return -ENOMEM;  
     }
+    memset(self->clients, 0, sizeof(Client)*self->client_num);
     for(usize i = 0; i < self->client_num; i++){
         self->clients[i].id = i;
+        self->clients[i].capacity = 0;
         self->clients[i].request = NULL;
         self->clients[i].response = NULL;
         self->clients[i].state = NonExistent;
@@ -244,9 +246,9 @@ void networker_drop(Networker *self){
 
 int proc(Networker* self){
     #define ring *self->ring
-
+    #define mutate ;mut++;
     u64 now = time(NULL);
-    
+    int mut = 0; 
     for(u64 i = 0; i < self->client_num; i++){
         if(self->clients[i].state == NonExistent){
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
@@ -256,7 +258,7 @@ int proc(Networker* self){
             data.Operation = OP_SocketAcc;
             self->clients[i].state = WaitingForAccept;
             sqe->user_data = data.value;
-            printf("Submitting accept on socket %d for client slot %lu\n", self->sock, i);
+            mutate
             continue;
         }       
         
@@ -306,8 +308,9 @@ int proc(Networker* self){
             }
             data.Operation = OP_Read;
             data.Author = i;
-            sqe->user_data = data.value;
             self->clients[i].state = Finished_H;
+            sqe->user_data = data.value;
+            mutate
             io_uring_prep_read(sqe,self->clients[i].sock, (unsigned char*)(&self->clients[i].req_headers)+self->clients[i].recv_offset, MESSAGE_HEADERS_SIZE-self->clients[i].recv_offset, 0);
             continue;
         }
@@ -328,6 +331,7 @@ int proc(Networker* self){
                 data.Author = i;
                 data.Operation = OP_Read;
                 sqe->user_data = data.value;
+                mutate
                 io_uring_prep_read(sqe,self->clients[i].sock, (unsigned char*)(&self->clients[i].req_headers)+self->clients[i].recv_offset, MESSAGE_HEADERS_SIZE-self->clients[i].recv_offset, 0);
                 continue;
             }
@@ -346,6 +350,7 @@ int proc(Networker* self){
             data.Operation = OP_Read;
             sqe->user_data = data.value;
             self->clients[i].state = Finished_R;
+            mutate
             io_uring_prep_read(sqe,self->clients[i].sock,self->clients[i].request + self->clients[i].recv_offset,self->clients[i].req_headers.size-self->clients[i].recv_offset,0);
             continue;
         }
@@ -367,6 +372,7 @@ int proc(Networker* self){
             continue;
         }
         if(self->clients[i].state == WrittingSock){
+            mutate
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             UserDataOpt data = {0};
             data.Author = i;
@@ -382,11 +388,7 @@ int proc(Networker* self){
             if(self->clients[i].writev_offset >= self->clients[i].response_size){
                 self->clients[i].writev_offset = 0;
                 self->clients[i].response_size = 0;
-                self->clients[i].state = Idle;
-                sfree(self->clients[i].response); 
-                self->clients[i].response = NULL;
-                sfree(self->clients[i].request); 
-                self->clients[i].request = NULL;
+                self->clients[i].state = Cooldown;
             }else{
                 self->clients[i].state = WrittingSock;
             }
@@ -401,6 +403,7 @@ int proc(Networker* self){
                 self->clients[i].ktls = 0;
             }
             #endif
+            mutate
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             UserDataOpt data = {0};
             data.Author = i;
@@ -418,13 +421,23 @@ int proc(Networker* self){
             memset(&self->clients[i].req_headers, 0, sizeof(MessageHeaders));
             continue;
         }
+        if(self->clients[i].state == Cooldown){
+            self->clients[i].state = Idle;
+            sfree(self->clients[i].response); 
+            sfree(self->clients[i].request);
+            self->clients[i].response = NULL;
+            self->clients[i].request = NULL;
+        }
     }
-    {
+
+        
+    if(mut != 0){
         int res = io_uring_submit(&ring);
-        printf("Submitted %d operations\n", res);
         if (res < 0){
             return res;
         };
+    }else{
+        thrd_yield();
     }
 
     while(1){
@@ -442,39 +455,26 @@ int proc(Networker* self){
         }
 
         
-        
+        self->clients[ptr].activity = now; 
         switch((int)data.Operation){
             case OP_Read:
-                self->clients[ptr].activity = now;
                 self->clients[ptr].recv_offset += res;
                 break;
             case OP_Write:
                 self->clients[ptr].writev_offset += res;
-                self->clients[ptr].activity = now;
                 break;
             case OP_SocketAcc:
                 {
                 u64 saved_id = self->clients[ptr].id;
                 memset(&self->clients[ptr], 0, sizeof(Client));
                 self->clients[ptr].sock = res;
-                int flag = 1;
-                if (setsockopt(self->clients[ptr].sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0){
-                    printf("Failed to setsocketopt, killing.\n");
-                    self->clients[ptr].state = Kill;
-                    break;;
-                };
-                if (fcntl(self->clients[ptr].sock, F_SETFL, O_NONBLOCK) < 0){
-                    self->clients[ptr].state = Kill;
-                    printf("Failed to set nonblock (fcntl), killing.\n");
-                    break;
-                };
 
                 #if __tls__
                     self->clients[ptr].state = TlsHandshake;    
                 #else
                     self->clients[ptr].state = Idle;
                 #endif
-                self->clients[ptr].activity = now;
+                
                 self->clients[ptr].id = saved_id;
                 
                 }
@@ -533,6 +533,6 @@ int kill_client(Networker* self, u64 client_id){
 }
 
 int cycle(Networker* self){
-    if (self->initiated != 1) return -1;
+    if (self->initiated != 1){printf("You have initialize the networker before starting with cycles.\n");return -1;};
     return proc(self);  
 }
