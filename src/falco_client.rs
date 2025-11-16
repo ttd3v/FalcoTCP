@@ -191,6 +191,7 @@ fn server_client() {
         let mut key = [0u8; 32];
         {
             use rand::TryRngCore;
+            use rand::rngs::OsRng;
             let mut rng = OsRng;
             rng.try_fill_bytes(&mut key).unwrap();
         }
