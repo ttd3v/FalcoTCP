@@ -42,14 +42,7 @@ fn main() {
                 println!("cargo:rustc-link-lib=static=ssl");
                 println!("cargo:rustc-link-lib=static=crypto");
             }
-            #[cfg(feature = "async")]
-            {
-                build.flag("-DBLOCKING=0");
-            }
-            #[cfg(not(feature = "async"))]
-            {
-                build.flag("-DBLOCKING=1");
-            }
+
             build.compile("raw_client");
         }
     }

@@ -81,7 +81,7 @@ impl FalcoClient {
     #[cfg(feature = "async")]
     pub async fn request(&self, input: Vec<u8>, allow_mitigation: u8) -> Result<Vec<u8>, Error> {
         let (s, k) = self.get_handle().await;
-        match s.lock().await.reqest(&input, &self.var).await {
+        match s.lock().await.request(&input, &self.var).await {
             Ok(a) => Ok(a),
             Err(e) => {
                 use std::io::ErrorKind;
@@ -295,4 +295,137 @@ fn server_client() {
         i.join().unwrap();
     }
     server_handle.join().unwrap();
+}
+#[cfg(all(
+    feature = "falco-server",
+    feature = "falco-client",
+    not(feature = "tls"),
+    feature = "async"
+))]
+#[tokio::test(flavor = "current_thread", start_paused = false)]
+async fn server_client() {
+    #[cfg(not(feature = "heuristics"))]
+    use crate::enums::CompressionAlgorithm;
+    use crate::networker::Networker;
+    #[cfg(feature = "encryption")]
+    use aes_gcm::{Aes256Gcm, KeyInit};
+    use std::time::Duration;
+    use tokio::{spawn, time::sleep};
+
+    #[cfg(feature = "encryption")]
+    fn get() -> Aes256Gcm {
+        let mut key = [0u8; 32];
+        {
+            use rand::TryRngCore;
+            use rand::rngs::OsRng;
+            let mut rng = OsRng;
+            rng.try_fill_bytes(&mut key).unwrap();
+        }
+        Aes256Gcm::new_from_slice(&key).unwrap()
+    }
+
+    const MAX_CLIENTS: usize = 2;
+    const NEEDED_REQS: usize = 5000;
+    let var: Var = Var {
+        #[cfg(feature = "encryption")]
+        cipher: get(),
+        #[cfg(not(feature = "heuristics"))]
+        compression: CompressionAlgorithm::None,
+    };
+    let variable = var.clone();
+    let server = Networker::new("127.0.0.1", 9090, 10, (MAX_CLIENTS * 2) as u16).unwrap();
+    let lock = Arc::new(Mutex::new(false));
+    let locka = lock.clone();
+    let mut requests = 0;
+    let server_handle = spawn(async move {
+        let mut server = server;
+        server.cycle().await.unwrap();
+
+        {
+            let mut a = locka.lock().await;
+            *a = true;
+        }
+        loop {
+            server.cycle().await.unwrap();
+
+            if let Some(c) = server.get_client().await {
+                println!("[SERVER] request!");
+                use crate::falco_pipeline::{pipeline_receive, pipeline_send};
+                requests += 1;
+                let (cmpr, value) = c.get_request().await;
+                let payload = pipeline_receive(cmpr.into(), value, &variable).unwrap();
+
+                let res = pipeline_send(payload.iter().map(|f| !*f).collect(), &variable).unwrap();
+                c.apply_response(res.1, res.0.into()).await.unwrap();
+                println!("[SERVER] responded!");
+                if requests == MAX_CLIENTS * NEEDED_REQS {
+                    println!("[SERVER] finishing...");
+                    break;
+                }
+            } else {
+                use tokio::task::yield_now;
+                println!("Sleeeep, requests:{}\n", requests);
+                yield_now().await;
+            }
+        }
+    });
+
+    loop {
+        use std::thread::yield_now;
+
+        let ready = lock.lock().await;
+        if *ready {
+            break;
+        }
+        drop(ready);
+        yield_now();
+    }
+
+    println!("Testing direct connection...");
+    let test_sock = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:9090".parse().unwrap(),
+        Duration::from_secs(1),
+    );
+    println!("Direct connection result: {:?}", test_sock);
+
+    let mut handlers = vec![];
+    for k in 0..MAX_CLIENTS {
+        let variable = var.clone();
+        handlers.push(spawn(async move {
+            sleep(Duration::from_millis(10)).await;
+            let b = FalcoClient::new(1, variable.clone(), "127.0.0.1", 9090).unwrap();
+            let n = Instant::now();
+            for i in 0..=NEEDED_REQS {
+                use rand::random_range;
+                println!("client {} is at {}", k, i);
+                let len = random_range(1..(1024 * 1024));
+                let buffer = vec![0u8; len];
+                let response = match b.request(buffer, 1).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        if i + 1 == NEEDED_REQS {
+                            return;
+                        }
+                        panic!("{}", e);
+                    }
+                };
+                assert_eq!(response.len(), len);
+                if i + 1 == NEEDED_REQS {
+                    break;
+                }
+            }
+            eprintln!("CLIENT({}) -> {}ns", k, n.elapsed().as_nanos());
+        }));
+    }
+
+    let mut er = Vec::new();
+    for i in handlers {
+        er.push(i.await);
+    }
+    if requests != NEEDED_REQS * MAX_CLIENTS {
+        for i in er {
+            i.unwrap();
+        }
+    }
+    server_handle.await.unwrap();
 }

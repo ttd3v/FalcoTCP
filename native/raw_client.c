@@ -1,3 +1,4 @@
+#include <asm-generic/errno-base.h>
 #include <sched.h>
 #include <string.h>
 #include <asm-generic/errno.h>
@@ -15,7 +16,7 @@
 #include "net.h"
 
 #define loop while(1)
-
+#define BLOCKING 1 
 #if TLS
 #include "openssl/ssl.h"
 #include <openssl/crypto.h>
@@ -23,32 +24,13 @@
 
 typedef u64 number;
 
-#if !BLOCKING
-#include <string.h>
-#include <fcntl.h>
-#endif
 
-#if BLOCKING
-#pragma message("Compiling in BLOCKING mode")
-#else
-#pragma message("Compiling in NON-BLOCKING mode")
-#endif
 
 // 500 MiB
 #define MAX_PAYLOAD_SIZE 524288000
 
 // pc stands for Primitive Client
 
-#if !BLOCKING
-enum PCASYNC{
-    PCASYNC_Nothing = 0,
-    PCASYNC_InputHeaders = 1,
-    PCASYNC_InputPayload = 2,
-    PCASYNC_OutputHeaders = 3,
-    PCASYNC_OutputPayload = 4,
-    PCASYNC_Done = 5,
-};
-#endif
 #define sfree(p) \
     do { \
         if ((p) != NULL) { \
@@ -64,15 +46,6 @@ typedef struct {
     #if TLS
     SSL* ssl;
     SSL_CTX* ctx;
-    #endif
-    #if !BLOCKING
-    unsigned char *input;
-    unsigned char *output;
-    MessageHeaders headers[2];
-    u64 readen;
-    u64 writen;
-    PcAsync processing;
-    u64 timeout_micro_secs;
     #endif
 } PrimitiveClient;
 
@@ -97,10 +70,6 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     }
     PrimitiveClient s={0};
     *self=s;
-    #if !BLOCKING
-    self->output = NULL;
-    self->timeout_micro_secs = 1000000;
-    #endif
     struct sockaddr_in sets = {0};
     sets.sin_family = AF_INET;
     sets.sin_port = htons(settings.port);
@@ -130,18 +99,6 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
             return -1;
         }
     #endif
-
-    #if !BLOCKING
-        int flags= fcntl(fd, F_GETFL,0);
-        if(flags < 0){
-            return -1;
-        }
-        flags |= O_NONBLOCK;
-        result = fcntl(fd, F_SETFL, flags);
-        if(result < 0){
-            return -ENOTSOCK;
-        };
-    #endif
     self->fd = fd;
     return 0;
 }
@@ -149,16 +106,13 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
 
 
 void pc_set_timeout(PrimitiveClient *self, u64 micro_secs){
-    #if BLOCKING
     /*struct timeval tv = {0};
     tv.tv_sec = micro_secs / 1000000;
     tv.tv_usec = micro_secs % 1000000;
     setsockopt(self->fd, SOL_SOCKET, SO_RCVTIMEO, (const unsigned char*)&tv, sizeof(tv));
     setsockopt(self->fd, SOL_SOCKET, SO_SNDTIMEO, (const unsigned char*)&tv, sizeof(tv));
     */
-    #else
-        self->timeout_micro_secs = micro_secs;
-    #endif
+    
 }
 
 
@@ -194,102 +148,6 @@ static inline int pc_read(PrimitiveClient *self, unsigned char *restrict buf, u6
     #endif
 }
 
-
-#if !BLOCKING
-int pc_async_step(PrimitiveClient *self){
-    int res = 0;
-    if(self->processing == PCASYNC_Nothing){
-        return res;
-    }
-    switch(self->processing){
-        case PCASYNC_InputHeaders:
-            {
-                // Serializing at every PCASYNC_InputHeaders because its very unlikely for it to require two passes
-                // The cost of holding a buffer is higher than serialize more than once
-                // The likelihood of it needing more than 2 passes is very low.
-                unsigned char buffer[sizeof(MessageHeaders)];
-                serialize_message_headers(&self->headers[0], buffer);
-                int result = pc_write(self, buffer+self->writen, sizeof(MessageHeaders)-self->writen);
-                res = result & -(result < 0);
-                self->writen += result;
-                // These ternary operations may be turned into a single instruction, easy to branch-predict otherwise.
-                self->processing = self->writen==sizeof(MessageHeaders)?PCASYNC_InputPayload:PCASYNC_InputHeaders;
-                self->writen = self->writen==sizeof(MessageHeaders)?0:self->writen;
-                break;
-            }
-        case PCASYNC_InputPayload:
-            {
-                int result = pc_write(self, self->input+self->writen, self->headers[0].size-self->writen);
-                res = result & -(result < 0);
-                self->writen += result;
-                self->processing = self->writen==self->headers[0].size?PCASYNC_OutputHeaders:PCASYNC_InputPayload;
-                self->writen = self->writen==self->headers[0].size?0:self->writen;
-                break; 
-            }
-        case PCASYNC_OutputHeaders:
-            {
-                int result = pc_read(self, ((unsigned char*)&self->headers[1]+self->readen), sizeof(MessageHeaders)-self->readen);
-                res = result & -(result < 0);
-                self->readen += result;
-                // These ternary operations may be turned into a single instruction, easy to branch-predict otherwise.
-                self->processing = self->readen==sizeof(MessageHeaders)?PCASYNC_OutputPayload:PCASYNC_OutputHeaders;
-                if(self->readen == sizeof(MessageHeaders)){
-                    unsigned char buffer[sizeof(MessageHeaders)];
-                    memcpy(buffer, &self->headers[1], sizeof(MessageHeaders));
-                    self->readen = 0;
-                    deserialize_message_headers(buffer,&self->headers[1]);
-                    sfree(self->output); // Always: NULL or a valid pointer
-                    if(self->headers[1].size > MAX_PAYLOAD_SIZE){
-                        res=-ENOMEM;
-                        break;
-                    }
-                    self->output = malloc(self->headers[1].size);
-                    res = !self->output?-ENOMEM:0;
-                    self->output = res < 0?NULL:self->output;
-                }
-                break; 
-            }
-        case PCASYNC_OutputPayload:
-            {
-                int result = pc_read(self, self->output+self->readen, self->headers[1].size-self->readen);
-                res = result & -(result < 0);
-                self->readen += result; 
-                self->processing = self->readen==self->headers[1].size?PCASYNC_Done:PCASYNC_OutputPayload;
-                self->readen = self->readen==self->headers[1].size?0:self->readen;
-                break;
-            }
-        default: break;
-    }
-    self->writen = res>=0?self->writen:0;
-    self->readen = res>=0?self->readen:0;
-    self->processing = res>=0?self->processing:0;
-    return res;
-};
-int pc_async_input(PrimitiveClient *self,MessageHeaders headers, unsigned char* buffer){
-    self->headers[0] = headers;
-    self->input = buffer;
-    self->writen = 0;
-    self->readen = 0;
-    sfree(self->output);
-    self->processing = PCASYNC_InputHeaders; 
-    return pc_async_step(self);
-}
-int pc_async_output(PrimitiveClient *self, MessageHeaders *restrict headers, unsigned char* buffer){
-    // Even while it is in fact not the most performant, I will be reallocating the memory into another buffer, and cloning it for FFI (With rust or another). That is for safety since I can't predict accuratelly the behavior of memory since it goes to other hands.
-    if(self->processing != PCASYNC_Done){
-        return -ENOPKG;
-    }
-    buffer = malloc(self->headers[1].size);
-    if(!buffer){
-        return -ENOMEM;
-    }
-    memcpy(buffer, self->output, self->headers[1].size);
-    memcpy(headers, &self->headers[1], sizeof(MessageHeaders));
-    sfree(self->output);
-    sfree(self->input);
-    return 0;
-}
-#endif
 
 #if BLOCKING
 int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, MessageHeaders headers){
