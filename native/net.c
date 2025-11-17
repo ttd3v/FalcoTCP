@@ -181,7 +181,6 @@ int start(Networker* self, struct NetworkerSettings* s){
     }
     #if __tls__
     if (tls_setup(self, s->cert_file, s->key_file) < 0) {
-        free(self->author_log);
         free(self->clients);
         free(self->ring);
         close(sock);

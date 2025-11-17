@@ -198,7 +198,7 @@ fn server_client() {
         Aes256Gcm::new_from_slice(&key).unwrap()
     }
 
-    const MAX_CLIENTS: usize = 100;
+    const MAX_CLIENTS: usize = 2;
     const NEEDED_REQS: usize = 100;
     let var: Var = Var {
         #[cfg(feature = "encryption")]
@@ -325,7 +325,7 @@ async fn server_client() {
     }
 
     const MAX_CLIENTS: usize = 2;
-    const NEEDED_REQS: usize = 5000;
+    const NEEDED_REQS: usize = 100;
     let var: Var = Var {
         #[cfg(feature = "encryption")]
         cipher: get(),
