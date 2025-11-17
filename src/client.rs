@@ -101,7 +101,6 @@ impl Client {
             compr_alg: compression,
             size: value.len() as u64,
         };
-        println!("+++\n");
         {
             let res = unsafe { pc_input_request(self, value.as_mut_ptr(), input_headers) };
             if res < 0 {
@@ -111,14 +110,12 @@ impl Client {
         drop(value);
         let mut buf: *mut u8 = std::ptr::null_mut();
         let mut headers: MessageHeaders = MessageHeaders::default();
-        println!("---");
         {
             let res = unsafe { pc_output_request(self, &raw mut buf, &mut headers) };
             if res < 0 {
                 return Err(Error::from_raw_os_error(-res));
             }
         }
-        println!("---\n+++\n");
         let vec = unsafe { Vec::from_raw_parts(buf, headers.size as usize, headers.size as usize) };
         match pipeline_receive(headers.compr_alg, vec, var) {
             Ok(a) => Ok(a),
