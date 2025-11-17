@@ -258,7 +258,7 @@ int proc(Networker* self){
     int mut = 0; 
     for(u64 i = 0; i < self->client_num; i++){
         if((iclnt.flag & 1)==1){continue;}
-        printf("[SERVER] Client(%lu) : %i\n",i,iclnt.state);
+        //printf("[SERVER] Client(%lu) : %i\n",i,iclnt.state);
         if(iclnt.state == NonExistent){
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             io_uring_prep_accept(sqe, self->sock, NULL,NULL, 0);
@@ -331,7 +331,7 @@ int proc(Networker* self){
                 memcpy(buffer, &iclnt.req_headers, 9);
                 deserialize_message_headers(buffer, &iclnt.req_headers);
                 iclnt.state = Reading;
-                printf("[SERVER] Client(%lu) Headers->size %lu\n",i,iclnt.req_headers.size);
+                //printf("[SERVER] Client(%lu) Headers->size %lu\n",i,iclnt.req_headers.size);
             }else{
                 if(iclnt.recv_offset == 0){
                     iclnt.state = Idle;

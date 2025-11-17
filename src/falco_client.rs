@@ -223,7 +223,7 @@ fn server_client() {
             server.cycle();
 
             if let Some(c) = server.get_client() {
-                println!("[SERVER] request!");
+                //println!("[SERVER] request!");
                 use crate::falco_pipeline::{pipeline_receive, pipeline_send};
                 requests += 1;
                 let (cmpr, value) = c.get_request();
@@ -231,13 +231,13 @@ fn server_client() {
 
                 let res = pipeline_send(payload.iter().map(|f| !*f).collect(), &variable).unwrap();
                 c.apply_response(res.1, res.0.into()).unwrap();
-                println!("[SERVER] responded!");
+                //println!("[SERVER] responded!");
                 if requests == MAX_CLIENTS * NEEDED_REQS {
                     println!("[SERVER] finishing...");
                     break;
                 }
             } else {
-                println!("Sleeeep, requests:{}\n", requests);
+                //println!("Sleeeep, requests:{}\n", requests);
                 sleep(Duration::from_millis(10));
             }
         }
@@ -270,7 +270,7 @@ fn server_client() {
             let n = Instant::now();
             for i in 0..=NEEDED_REQS {
                 use rand::random_range;
-                println!("client {} is at {}", k, i);
+                //println!("client {} is at {}", k, i);
                 let len = random_range(1..(1024 * 1024));
                 let buffer = vec![0u8; len];
                 let response = match b.request(buffer, 1) {
@@ -364,7 +364,7 @@ async fn server_client() {
                 }
             } else {
                 use tokio::task::yield_now;
-                println!("Sleeeep, requests:{}\n", requests);
+                //println!("Sleeeep, requests:{}\n", requests);
                 yield_now().await;
             }
         }
@@ -397,7 +397,7 @@ async fn server_client() {
             let n = Instant::now();
             for i in 0..=NEEDED_REQS {
                 use rand::random_range;
-                println!("client {} is at {}", k, i);
+                //println!("client {} is at {}", k, i);
                 let len = random_range(1..(1024 * 1024));
                 let buffer = vec![0u8; len];
                 let response = match b.request(buffer, 1).await {

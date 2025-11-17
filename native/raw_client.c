@@ -173,7 +173,7 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
         }
     }
     if(res < 0){
-        printf("bad -\n");
+        //printf("bad -\n");
         return -errno;
     }
     written = 0;
@@ -193,7 +193,7 @@ int pc_input_request(PrimitiveClient *self, unsigned char *restrict buf, Message
 int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, MessageHeaders *restrict headers){
     u64 readen = 0;
     int res = 0;
-    printf("@\n");
+    //printf("@\n");
     {
         unsigned char buffer[sizeof(MessageHeaders)] = {0};
         loop{
@@ -215,7 +215,7 @@ int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, Messa
         }
         deserialize_message_headers(buffer, headers);
     }
-    printf("@\n");
+    //printf("@\n");
     {
         readen = 0;
         u64 size = headers->size;
@@ -231,7 +231,7 @@ int pc_output_request(PrimitiveClient *self, unsigned char **restrict buf, Messa
             if(readen == size){break;};
         }
     }
-    printf("@/\n");
+    //printf("@/\n");
     
     return res;
 }

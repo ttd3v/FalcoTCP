@@ -11,6 +11,10 @@ fn main() {
             build.file("native/net.c").include("native");
 
             build.flag("-O3");
+            #[cfg(feature = "native")]
+            {
+                build.flag("-march=native");
+            }
             #[cfg(feature = "tls")]
             {
                 build.flag("-D__tls__=1");
@@ -36,6 +40,10 @@ fn main() {
             build.file("native/raw_client.c").include("native");
 
             build.flag("-O3");
+            #[cfg(feature = "native")]
+            {
+                build.flag("-march=native");
+            }
             #[cfg(feature = "tls")]
             {
                 build.flag("-DTLS=1");

@@ -38,6 +38,7 @@ async=[]
 tokio-tls=["tokio-runtime","tls"]
 dynamic-uring-link = []
 dev-redundancies = []
+native = []
 [dependencies]
 aes-gcm = {version="=0.10.3",optional=true}
 tokio = {version="=1.47.1",features=["full","test-util"], optional=true}
