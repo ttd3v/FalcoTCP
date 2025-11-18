@@ -429,3 +429,156 @@ async fn server_client() {
     }
     server_handle.await.unwrap();
 }
+
+#[cfg(all(
+    feature = "falco-server",
+    feature = "falco-client",
+    feature = "tls",
+    not(feature = "async")
+))]
+#[test]
+fn server_client() {
+    #[cfg(not(feature = "heuristics"))]
+    use crate::enums::CompressionAlgorithm;
+    use crate::networker::Networker;
+    #[cfg(feature = "encryption")]
+    use aes_gcm::{Aes256Gcm, KeyInit};
+    use std::thread::{sleep, spawn};
+    use std::time::Duration;
+
+    #[cfg(feature = "encryption")]
+    fn get() -> Aes256Gcm {
+        let mut key = [0u8; 32];
+        {
+            use rand::TryRngCore;
+            use rand::rngs::OsRng;
+            let mut rng = OsRng;
+            rng.try_fill_bytes(&mut key).unwrap();
+        }
+        Aes256Gcm::new_from_slice(&key).unwrap()
+    }
+
+    use rcgen::generate_simple_self_signed;
+    let subject_alt_names = vec!["hello.world.example".to_string(), "localhost".to_string()];
+
+    let v = generate_simple_self_signed(subject_alt_names).unwrap();
+
+    {
+        let _ = std::fs::remove_file("/tmp/cert.pem");
+        let _ = std::fs::remove_file("/tmp/key.pem");
+    }
+
+    std::fs::write("/tmp/cert.pem", v.cert.pem()).unwrap();
+    std::fs::write("/tmp/key.pem", v.signing_key.serialize_pem()).unwrap();
+
+    const MAX_CLIENTS: usize = 2;
+    const NEEDED_REQS: usize = 100;
+    let var: Var = Var {
+        #[cfg(feature = "encryption")]
+        cipher: get(),
+        #[cfg(not(feature = "heuristics"))]
+        compression: CompressionAlgorithm::None,
+        password: [
+            128u8, 102u8, 30u8, 123u8, 1u8, 10u8, 23u8, 90u8, 255u8, 0u8, 128u8, 127u8, 77u8, 99u8,
+            11u8, 22u8, 0u8, 254u8, 100u8, 70u8, 17u8, 91u8, 25u8, 88u8, 1u8, 2u8, 3u8, 9u8, 230u8,
+            130u8, 100u8, 33u8,
+        ],
+    };
+    let variable = var.clone();
+    let server = Networker::new(
+        "127.0.0.1",
+        9090,
+        10,
+        (MAX_CLIENTS * 2) as u16,
+        "/tmp/cert.pem",
+        "/tmp/key.pem",
+    )
+    .unwrap();
+    let lock = Arc::new(Mutex::new(false));
+    let locka = lock.clone();
+    let mut requests = 0;
+    let server_handle = spawn(move || {
+        let mut server = server;
+        server.cycle();
+
+        {
+            let mut a = locka.lock().unwrap();
+            *a = true;
+        }
+        loop {
+            server.cycle();
+
+            if let Some(c) = server.get_client() {
+                //println!("[SERVER] request!");
+                use crate::falco_pipeline::{pipeline_receive, pipeline_send};
+                requests += 1;
+                let (cmpr, value) = c.get_request();
+                let payload = pipeline_receive(cmpr.into(), value, &variable).unwrap();
+
+                let res = pipeline_send(payload.iter().map(|f| !*f).collect(), &variable).unwrap();
+                c.apply_response(res.1, res.0.into()).unwrap();
+                //println!("[SERVER] responded!");
+                if requests == MAX_CLIENTS * NEEDED_REQS {
+                    println!("[SERVER] finishing...");
+                    break;
+                }
+            } else {
+                //println!("Sleeeep, requests:{}\n", requests);
+                sleep(Duration::from_millis(10));
+            }
+        }
+    });
+
+    loop {
+        use std::thread::yield_now;
+
+        let ready = lock.lock().unwrap();
+        if *ready {
+            break;
+        }
+        drop(ready);
+        yield_now();
+    }
+
+    println!("Testing direct connection...");
+    let test_sock = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:9090".parse().unwrap(),
+        Duration::from_secs(1),
+    );
+    println!("Direct connection result: {:?}", test_sock);
+
+    let mut handlers = vec![];
+    for k in 0..MAX_CLIENTS {
+        let variable = var.clone();
+        handlers.push(spawn(move || {
+            sleep(Duration::from_millis(10));
+            let b = FalcoClient::new(1, variable.clone(), "127.0.0.1", 9090, "localhost").unwrap();
+            let n = Instant::now();
+            for i in 0..=NEEDED_REQS {
+                use rand::random_range;
+                //println!("client {} is at {}", k, i);
+                let len = random_range(1..(1024 * 1024));
+                let buffer = vec![0u8; len];
+                let response = match b.request(buffer, 1) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        if i + 1 == NEEDED_REQS {
+                            return;
+                        }
+                        panic!("{}", e);
+                    }
+                };
+                assert_eq!(response.len(), len);
+                if i + 1 == NEEDED_REQS {
+                    break;
+                }
+            }
+            eprintln!("CLIENT({}) -> {}ns", k, n.elapsed().as_nanos());
+        }));
+    }
+
+    for i in handlers {
+        i.join().unwrap();
+    }
+    server_handle.join().unwrap();
+}

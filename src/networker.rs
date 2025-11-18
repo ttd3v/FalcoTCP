@@ -93,6 +93,10 @@ impl Networker {
     /// - Port: The port
     /// - Max_queue: The maximum count of sockets that can be left hanging before the server accepts it
     /// - Max_clients: The count of clients that will be priorly allocated
+    ///
+    /// [tls feature parameters]
+    /// - cert_file: The certificate file path
+    /// - key_file: The key file path
     pub fn new(
         host: &str,
         port: u16,

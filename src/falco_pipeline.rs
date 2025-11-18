@@ -29,6 +29,9 @@ use crate::compression_levels::ZSTD_LEVEL;
 
 use crate::enums::CompressionAlgorithm;
 
+#[cfg(feature = "tls")]
+type Passkey = [u8; 32];
+
 #[cfg(feature = "heuristics")]
 use crate::heuristics::get_compressor;
 
@@ -38,6 +41,8 @@ pub struct Var {
     pub cipher: Aes256Gcm,
     #[cfg(not(feature = "heuristics"))]
     pub compression: CompressionAlgorithm,
+    #[cfg(feature = "tls")]
+    pub password: Passkey,
 }
 
 #[inline]
@@ -51,7 +56,9 @@ pub fn pipeline_send(mut input: Vec<u8>, _var: &Var) -> Result<(u8, Vec<u8>), Er
     #[cfg(not(feature = "heuristics"))]
     let compression = &_var.compression;
 
-    let mut compressed: Vec<u8> = match *compression {
+    let mut output = Vec::with_capacity(32);
+
+    output.extend(match *compression {
         #[cfg(feature = "LZMA")]
         CompressionAlgorithm::Lzma => {
             let mut encoder = xz2::write::XzEncoder::new(Vec::new(), LZMA_LEVEL as u32);
@@ -89,9 +96,9 @@ pub fn pipeline_send(mut input: Vec<u8>, _var: &Var) -> Result<(u8, Vec<u8>), Er
         #[cfg(feature = "LZ4")]
         CompressionAlgorithm::Lz4 => lz4_flex::compress(&input),
         _ => input,
-    };
+    });
 
-    compressed.shrink_to_fit();
+    output.shrink_to_fit();
 
     #[cfg(feature = "LZ4")]
     let mut stuff = {
@@ -106,7 +113,7 @@ pub fn pipeline_send(mut input: Vec<u8>, _var: &Var) -> Result<(u8, Vec<u8>), Er
     };
 
     #[cfg(not(feature = "LZ4"))]
-    let mut stuff = compressed;
+    let mut stuff = output;
 
     #[cfg(feature = "encryption")]
     {
@@ -135,6 +142,15 @@ pub fn pipeline_send(mut input: Vec<u8>, _var: &Var) -> Result<(u8, Vec<u8>), Er
 #[allow(unused_mut)]
 pub fn pipeline_receive(compr_alg: u8, mut input: Vec<u8>, _var: &Var) -> Result<Vec<u8>, Error> {
     let compression: CompressionAlgorithm = compr_alg.into();
+    #[cfg(feature = "tls")]
+    {
+        if input.len() < 32 {
+            return Err(Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Invalid password",
+            ));
+        }
+    }
 
     #[cfg(feature = "encryption")]
     {
@@ -162,18 +178,38 @@ pub fn pipeline_receive(compr_alg: u8, mut input: Vec<u8>, _var: &Var) -> Result
         0u64
     };
 
+    #[cfg(not(feature = "tls"))]
+    let offset = 0;
+    #[cfg(feature = "tls")]
+    {
+        let offset = 32;
+        let foreign_passkey = &input[0..offset];
+        let mut diff = 0u8;
+        for (a, b) in foreign_passkey.iter().zip(_var.password.iter()) {
+            diff |= a ^ b;
+        }
+
+        if diff != 0 {
+            return Err(Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Invalid password",
+            ));
+        }
+    }
+
     let decompressed: Vec<u8> = match compression {
         #[cfg(feature = "LZMA")]
         CompressionAlgorithm::Lzma => {
-            let mut decoder = xz2::read::XzDecoder::new(&input[..]);
+            let mut decoder = xz2::read::XzDecoder::new(&input[offset..]);
             let mut output = Vec::new();
             decoder.read_to_end(&mut output)?;
             output
         }
         #[cfg(feature = "ZSTD")]
         CompressionAlgorithm::Zstd => {
-            let decomp_size =
-                unsafe { ZSTD_getDecompressedSize(input.as_ptr() as *const c_void, input.len()) };
+            let decomp_size = unsafe {
+                ZSTD_getDecompressedSize(input[offset..].as_ptr() as *const c_void, input.len())
+            };
             if decomp_size as u64 == ZSTD_CONTENTSIZE_UNKNOWN as u64
                 || decomp_size as u64 == ZSTD_CONTENTSIZE_ERROR as u64
             {
@@ -198,13 +234,13 @@ pub fn pipeline_receive(compr_alg: u8, mut input: Vec<u8>, _var: &Var) -> Result
         CompressionAlgorithm::Gzip => {
             use flate2::read::GzDecoder;
 
-            let mut decoder = GzDecoder::new(&input[..]);
+            let mut decoder = GzDecoder::new(&input[offset..]);
             let mut output = Vec::new();
             decoder.read_to_end(&mut output)?;
             output
         }
         #[cfg(feature = "LZ4")]
-        CompressionAlgorithm::Lz4 => match lz4_flex::decompress(&input, _size as usize) {
+        CompressionAlgorithm::Lz4 => match lz4_flex::decompress(&input[offset..], _size as usize) {
             Ok(a) => a,
             Err(e) => return Err(Error::other(e.to_string())),
         },
@@ -232,6 +268,12 @@ mod test_pipeline {
             },
             #[cfg(not(feature = "heuristics"))]
             compression: CompressionAlgorithm::get(),
+            #[cfg(feature = "tls")]
+            password: [
+                128u8, 102u8, 30u8, 123u8, 1u8, 10u8, 23u8, 90u8, 255u8, 0u8, 128u8, 127u8, 77u8,
+                99u8, 11u8, 22u8, 0u8, 254u8, 100u8, 70u8, 17u8, 91u8, 25u8, 88u8, 1u8, 2u8, 3u8,
+                9u8, 230u8, 130u8, 100u8, 33u8,
+            ],
         };
         let mut bts = vec![0u8; 16];
         #[cfg(feature = "encryption")]
@@ -249,8 +291,7 @@ mod test_pipeline {
         }
         let result = {
             let b = pipeline_send(bts.clone(), &var).unwrap();
-            let a = pipeline_receive(b.0, b.1, &var).unwrap();
-            a
+            pipeline_receive(b.0, b.1, &var).unwrap()
         };
         assert!(bts == result);
     }
