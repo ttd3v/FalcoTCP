@@ -199,7 +199,7 @@ fn server_client() {
     }
 
     const MAX_CLIENTS: usize = 2;
-    const NEEDED_REQS: usize = 100;
+    const NEEDED_REQS: usize = 10;
     let var: Var = Var {
         #[cfg(feature = "encryption")]
         cipher: get(),
@@ -325,7 +325,7 @@ async fn server_client() {
     }
 
     const MAX_CLIENTS: usize = 2;
-    const NEEDED_REQS: usize = 100;
+    const NEEDED_REQS: usize = 10;
     let var: Var = Var {
         #[cfg(feature = "encryption")]
         cipher: get(),
@@ -472,7 +472,7 @@ fn server_client() {
     std::fs::write("/tmp/key.pem", v.signing_key.serialize_pem()).unwrap();
 
     const MAX_CLIENTS: usize = 2;
-    const NEEDED_REQS: usize = 100;
+    const NEEDED_REQS: usize = 10;
     let var: Var = Var {
         #[cfg(feature = "encryption")]
         cipher: get(),

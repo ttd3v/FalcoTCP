@@ -20,6 +20,7 @@
 #if TLS
 #include "openssl/ssl.h"
 #include <openssl/crypto.h>
+#include <openssl/err.h>
 #endif
 
 typedef u64 number;
