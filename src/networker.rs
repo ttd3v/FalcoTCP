@@ -465,7 +465,7 @@ unsafe extern "C" {
     fn kill_client(self_: *mut RawNetworker, client_id: u64) -> c_int;
     fn cycle(self_: *mut RawNetworker) -> c_int;
 }
-#[cfg(all(feature = "server", not(feature = "async")))]
+#[cfg(all(feature = "server", not(feature = "async"), not(feature = "tls")))]
 #[test]
 fn stress_networker() {
     let mut c = Networker::new("127.0.0.1", 8080, 1, 1).unwrap();
