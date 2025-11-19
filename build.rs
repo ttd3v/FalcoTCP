@@ -47,6 +47,8 @@ fn main() {
             #[cfg(feature = "tls")]
             {
                 build.flag("-DTLS=1");
+                build.flag("-lssl");
+                build.flag("-lcrypto");
                 println!("cargo:rustc-link-lib=ssl");
                 println!("cargo:rustc-link-lib=crypto");
             }

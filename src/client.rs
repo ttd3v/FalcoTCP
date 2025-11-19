@@ -26,15 +26,25 @@ typedef struct {
 */
 
 #[repr(C)]
-#[derive(Default)]
 pub struct Client {
     _fd: i32,
     #[cfg(feature = "tls")]
-    _ssl: usize,
+    _ssl: *mut std::ffi::c_void,
     #[cfg(feature = "tls")]
-    _ssl_context: usize,
+    _ssl_context: *mut std::ffi::c_void,
 }
 
+impl Default for Client {
+    fn default() -> Self {
+        Client {
+            _fd: -1,
+            #[cfg(feature = "tls")]
+            _ssl: std::ptr::null_mut(),
+            #[cfg(feature = "tls")]
+            _ssl_context: std::ptr::null_mut(),
+        }
+    }
+}
 fn zero() -> Client {
     Client::default()
 }

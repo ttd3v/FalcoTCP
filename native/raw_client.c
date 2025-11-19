@@ -97,6 +97,12 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
         SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
         SSL_CTX_set_default_verify_paths(ctx);
         self->ssl = SSL_new(ctx);
+        if (self->ssl == NULL) {
+            ERR_print_errors_fp(stderr);
+            SSL_CTX_free(ctx);
+            close(fd);
+            return -1;
+        }
         self->ctx = ctx;
         SSL_set_fd(self->ssl, fd);
         SSL_set_tlsext_host_name(self->ssl, settings.domain);
@@ -111,13 +117,11 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
 
 
 void pc_set_timeout(PrimitiveClient *self, u64 micro_secs){
-    /*struct timeval tv = {0};
+    struct timeval tv = {0};
     tv.tv_sec = micro_secs / 1000000;
     tv.tv_usec = micro_secs % 1000000;
     setsockopt(self->fd, SOL_SOCKET, SO_RCVTIMEO, (const unsigned char*)&tv, sizeof(tv));
     setsockopt(self->fd, SOL_SOCKET, SO_SNDTIMEO, (const unsigned char*)&tv, sizeof(tv));
-    */
-    
 }
 
 
