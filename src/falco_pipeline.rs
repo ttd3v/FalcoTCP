@@ -103,12 +103,12 @@ pub fn pipeline_send(mut input: Vec<u8>, _var: &Var) -> Result<(u8, Vec<u8>), Er
     #[cfg(feature = "LZ4")]
     let mut stuff = {
         if matches!(compression, CompressionAlgorithm::Lz4) {
-            let mut buffer = Vec::with_capacity(8 + compressed.len());
+            let mut buffer = Vec::with_capacity(8 + output.len());
             buffer.extend_from_slice(&size.to_be_bytes());
-            buffer.extend_from_slice(&compressed);
+            buffer.extend_from_slice(&output);
             buffer
         } else {
-            compressed
+            output
         }
     };
 
