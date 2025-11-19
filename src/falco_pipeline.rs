@@ -186,8 +186,8 @@ pub fn pipeline_receive(compr_alg: u8, mut input: Vec<u8>, _var: &Var) -> Result
         if input.len() < 28 {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid encrypted data"));
         }
-        let nonce_slice = &input[(offset + 0)..(offset + 12)];
-        let payload = &input[(offset + 12)..];
+        let nonce_slice = &input[0..12];
+        let payload = &input[12..];
         match _var.cipher.decrypt(nonce_slice.into(), payload.as_ref()) {
             Ok(dec) => input = dec,
             Err(e) => return Err(Error::other(e.to_string())),
