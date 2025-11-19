@@ -1,4 +1,5 @@
 #include <asm-generic/errno-base.h>
+#include <openssl/prov_ssl.h>
 #include <sched.h>
 #include <string.h>
 #include <asm-generic/errno.h>
@@ -87,15 +88,17 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     }
     
     #if TLS
-        SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+        SSL_library_init();
+        const SSL_METHOD* method = TLS_client_method();
+        if (method == NULL) {
+            ERR_print_errors_fp(stderr);
+            return -1;
+        }
+        SSL_CTX *ctx = SSL_CTX_new(method);
         if (ctx == NULL) {
             ERR_print_errors_fp(stderr);
             return -1;
         }
-        SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
-        SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION);
-        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-        SSL_CTX_set_default_verify_paths(ctx);
         self->ssl = SSL_new(ctx);
         if (self->ssl == NULL) {
             ERR_print_errors_fp(stderr);
