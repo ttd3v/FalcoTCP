@@ -159,8 +159,6 @@ pub fn pipeline_receive(compr_alg: u8, mut input: Vec<u8>, _var: &Var) -> Result
         }
     }
 
-    #[cfg(not(feature = "tls"))]
-    let offset = 0;
     #[cfg(feature = "tls")]
     let offset = 32;
     #[cfg(feature = "tls")]
