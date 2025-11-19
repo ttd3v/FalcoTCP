@@ -87,7 +87,7 @@ int pc_create(PrimitiveClient* self, PrimitiveClientSettings *settings_ptr){
     
     #if TLS
         SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-        if (self->ssl_ctx == NULL) {
+        if (ctx == NULL) {
             ERR_print_errors_fp(stderr);
             return -1;
         }
